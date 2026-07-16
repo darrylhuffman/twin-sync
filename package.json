@@ -1,0 +1,46 @@
+{
+  "name": "twin-sync",
+  "version": "0.1.0",
+  "description": "Sync two project directories that live in separate git repos but share the same codebase. Uses git history to scope changes and content hashing to migrate only what actually differs.",
+  "type": "module",
+  "bin": {
+    "twin-sync": "dist/cli.js",
+    "tsync": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "git",
+    "sync",
+    "mirror",
+    "monorepo",
+    "codebase",
+    "migrate",
+    "diff",
+    "sha256"
+  ],
+  "author": "dyudabomb@gmail.com",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}
