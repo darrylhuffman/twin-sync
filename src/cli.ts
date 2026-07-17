@@ -40,6 +40,7 @@ const BOOL_FLAGS = new Set([
   "dry-run",
   "yes",
   "delete",
+  "no-delete",
   "json",
   "no-color",
   "force",
@@ -111,6 +112,7 @@ interface CommonOpts {
   include: string[];
   exclude: string[];
   deletions: boolean;
+  noDelete: boolean;
   since?: string;
   dryRun: boolean;
   yes: boolean;
@@ -130,6 +132,7 @@ function commonOpts(args: Args, cfg: Config): CommonOpts {
     include: args.multi.get("include") ?? [],
     exclude: [...cfg.exclude, ...(args.multi.get("exclude") ?? [])],
     deletions: args.bool.has("delete"),
+    noDelete: args.bool.has("no-delete"),
     since: args.str.get("since"),
     dryRun: args.bool.has("dry-run"),
     yes: args.bool.has("yes"),
@@ -481,9 +484,18 @@ async function cmdVaultMigrate(cfg: Config, direction: "a" | "b", opts: CommonOp
           include: opts.include,
           exclude: opts.exclude,
           dryRun: dry,
-          prune: opts.deletions,
+          // The vault mirrors A, so deletions propagate by default; --no-delete
+          // keeps it additive (never removes a blob from B).
+          prune: !opts.noDelete,
         })
-      : decryptPull(cfg.b, cfg.a, key, { dryRun: dry });
+      : decryptPull(cfg.b, cfg.a, key, {
+          include: opts.include,
+          exclude: opts.exclude,
+          dryRun: dry,
+          // Symmetric with push: A mirrors the vault, so files removed from B
+          // are removed from A too. --no-delete keeps it additive.
+          prune: !opts.noDelete,
+        });
 
   const preview = await run(true);
 
@@ -572,7 +584,8 @@ ${c.bold("Options")}
   --since <ref>        only consider files changed since <ref> in the source repo
   --include <glob>     restrict to matching paths (repeatable, git pathspec)
   --exclude <glob>     skip matching paths (repeatable, git pathspec)
-  --delete             also remove files that no longer exist in the source
+  --delete             (plaintext mode) also remove dest files missing from the source
+  --no-delete          (vault mode) don't propagate deletions — push/pull stay additive
   --dry-run, -n        preview without writing
   --yes, -y            skip the confirmation prompt
   --json               machine-readable output
@@ -585,8 +598,9 @@ ${c.bold("Encrypted vault")} ${c.gray("(--key)")}
   With --key, B becomes an encrypted git repo: files are stored as opaque
   store/<id>.enc blobs plus an encrypted manifest — no names, paths, or
   contents leak to the git host. Only files whose content changed are
-  re-sealed, so 'git push' of B transfers just the real diff. Additive by
-  default; add --delete to prune blobs for files removed from A.
+  re-sealed, so 'git push' of B transfers just the real diff. push and pull
+  both mirror: a file deleted on one side is removed from the other on the
+  next sync. Pass --no-delete to keep the target additive instead.
 
 ${c.bold("Configuration")} ${c.gray("(priority: --config > env > .twin-sync.json)")}
   TWIN_SYNC_A, TWIN_SYNC_B   absolute paths to the two project roots

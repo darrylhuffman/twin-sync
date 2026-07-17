@@ -30,7 +30,7 @@ import {
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
-import { listFiles } from "./git.js";
+import { isGitRepo, listFiles } from "./git.js";
 import { sha256, statSize } from "./hash.js";
 import { seal, open, deriveKey, newMeta, type CryptMeta } from "./crypt.js";
 
@@ -178,7 +178,6 @@ async function diffAgainstManifest(
   pathspecs: string[],
 ): Promise<Diff> {
   const files = listFiles(src, pathspecs);
-  const present = new Set(files);
 
   const prints = await inBatches(files, 64, async (rel) => {
     const abs = join(src, rel);
@@ -187,9 +186,14 @@ async function diffAgainstManifest(
     return { rel, sha, size };
   });
 
+  // "present" = files that actually exist on disk. git ls-files still lists a
+  // tracked file whose working copy was deleted, so basing this on the on-disk
+  // fingerprint (size !== null) is what makes such a deletion count as one.
+  const present = new Set(prints.filter((p) => p.size !== null).map((p) => p.rel));
+
   const diff: Diff = { add: [], modify: [], delete: [], unchanged: 0, scanned: files.length };
   for (const { rel, sha, size } of prints) {
-    if (sha === null || size === null) continue; // vanished between listing and hashing
+    if (sha === null || size === null) continue; // deleted from disk — handled as a deletion below
     const entry = manifest.files[rel];
     if (!entry) diff.add.push({ path: rel, sha, size });
     else if (entry.sha256 !== sha) diff.modify.push({ path: rel, sha, size, id: entry.id });
@@ -261,11 +265,19 @@ export async function encryptPush(
 // pull  (encrypted vault B → A)
 // ---------------------------------------------------------------------------
 
+export interface PullOptions {
+  include: string[];
+  exclude: string[];
+  dryRun: boolean;
+  /** remove git-visible files from A that are no longer in the vault. */
+  prune: boolean;
+}
+
 export async function decryptPull(
   vault: string,
   dst: string,
   passphrase: string,
-  opts: { dryRun: boolean },
+  opts: PullOptions,
 ): Promise<VaultResult> {
   const meta = loadMeta(vault);
   if (!meta) {
@@ -274,6 +286,7 @@ export async function decryptPull(
   const key = deriveKey(passphrase, meta);
   const manifest = loadManifest(vault, key);
   const entries = Object.entries(manifest.files);
+  const inVault = new Set(Object.keys(manifest.files));
 
   const changes: VaultChange[] = [];
   let unchanged = 0;
@@ -293,6 +306,19 @@ export async function decryptPull(
     }
     changes.push({ path: rel, type });
   });
+
+  // Mirror deletions: git-visible files in A that the vault no longer has are
+  // removed. Scoped to git's file list so .gitignore'd paths (node_modules,
+  // secrets, build output) are never touched. Skipped when A isn't a git repo
+  // (e.g. a first decrypt into an empty dir) — there's nothing to prune.
+  if (opts.prune && isGitRepo(dst)) {
+    const pathspecs = buildPathspecs(opts.include, opts.exclude);
+    for (const rel of listFiles(dst, pathspecs)) {
+      if (inVault.has(rel)) continue;
+      if (!opts.dryRun) rmSync(join(dst, rel), { force: true });
+      changes.push({ path: rel, type: "delete" });
+    }
+  }
 
   changes.sort((x, y) => x.path.localeCompare(y.path));
   return { changes, unchanged, scanned: entries.length };

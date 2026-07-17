@@ -25,6 +25,6 @@ export { compare, sha256 } from "./hash.js";
 
 // Encrypted-vault mode: mirror A into an encrypted git repo B (and back).
 export { encryptPush, decryptPull, vaultStatus } from "./vault.js";
-export type { Manifest, VaultEntry, VaultChange, VaultResult, PushOptions } from "./vault.js";
+export type { Manifest, VaultEntry, VaultChange, VaultResult, PushOptions, PullOptions } from "./vault.js";
 export { deriveKey, newMeta, seal, open } from "./crypt.js";
 export type { CryptMeta } from "./crypt.js";
