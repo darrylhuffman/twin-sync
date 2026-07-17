@@ -11,13 +11,15 @@
  */
 
 import { createInterface } from "node:readline/promises";
+import { execSync } from "node:child_process";
 import { resolve, join } from "node:path";
 import { existsSync } from "node:fs";
 
 import { loadConfig, writeConfig, CONFIG_FILENAME, type Config } from "./config.js";
-import { isGitRepo, lastCommit } from "./git.js";
+import { isGitRepo, lastCommit, commitAll, pushRepo } from "./git.js";
 import { buildPlan, summarize, type Change, type Plan } from "./planner.js";
 import { apply, shortPath } from "./sync.js";
+import { encryptPush, decryptPull, vaultStatus, type VaultChange, type VaultResult } from "./vault.js";
 import { c, setColor, out, info, warn, fail } from "./logger.js";
 
 const VERSION = "0.1.0";
@@ -41,11 +43,19 @@ const BOOL_FLAGS = new Set([
   "json",
   "no-color",
   "force",
+  "commit",
+  "push",
   "help",
   "version",
 ]);
 const MULTI_FLAGS = new Set(["include", "exclude"]);
-const ALIASES: Record<string, string> = { y: "yes", h: "help", v: "version", n: "dry-run" };
+const ALIASES: Record<string, string> = {
+  y: "yes",
+  h: "help",
+  v: "version",
+  n: "dry-run",
+  m: "message",
+};
 
 function parse(argv: string[]): Args {
   const args: Args = {
@@ -105,6 +115,14 @@ interface CommonOpts {
   dryRun: boolean;
   yes: boolean;
   json: boolean;
+  /** Passphrase for encrypted-vault mode; when set, push/pull encrypt/decrypt. */
+  key?: string;
+  /** After an encrypted push, commit the vault repo B. Implied by `push`. */
+  commit: boolean;
+  /** After an encrypted push, commit and `git push` the vault repo B. */
+  push: boolean;
+  /** Commit message for --commit/--push. */
+  message?: string;
 }
 
 function commonOpts(args: Args, cfg: Config): CommonOpts {
@@ -116,7 +134,50 @@ function commonOpts(args: Args, cfg: Config): CommonOpts {
     dryRun: args.bool.has("dry-run"),
     yes: args.bool.has("yes"),
     json: args.bool.has("json"),
+    key: resolveKey(args, cfg),
+    commit: args.bool.has("commit"),
+    push: args.bool.has("push"),
+    message: args.str.get("message"),
   };
+}
+
+/**
+ * Resolve the vault passphrase, most-explicit source first:
+ *   --key <literal> › --key-command <cmd> › TWIN_SYNC_KEY_COMMAND › config
+ *   keyCommand › TWIN_SYNC_KEY <literal>
+ * A "command" source has its stdout used as the key, so the secret can live in
+ * a keychain instead of a plaintext env var or file.
+ */
+function resolveKey(args: Args, cfg: Config): string | undefined {
+  const literal = args.str.get("key");
+  if (literal !== undefined) return literal;
+
+  const cmd =
+    args.str.get("key-command") ??
+    process.env.TWIN_SYNC_KEY_COMMAND ??
+    cfg.keyCommand;
+  if (cmd) return runKeyCommand(cmd);
+
+  return process.env.TWIN_SYNC_KEY;
+}
+
+/** Run a key command and use its stdout (minus a trailing newline) as the key. */
+function runKeyCommand(cmd: string): string {
+  let out: string;
+  try {
+    // stdout is captured (the secret); stdin/stderr are inherited so an
+    // interactive unlock (biometric popup, passphrase prompt) still works.
+    out = execSync(cmd, {
+      encoding: "utf8",
+      stdio: ["inherit", "pipe", "inherit"],
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (err) {
+    return fail(`Key command failed: ${cmd}\n${(err as Error).message}`);
+  }
+  const key = out.replace(/[\r\n]+$/, "");
+  return key || fail(`Key command produced no output: ${cmd}`);
 }
 
 function sym(type: Change["type"]): string {
@@ -148,6 +209,30 @@ function printPlan(plan: Plan, fromLabel: string, toLabel: string): void {
       c.gray(" · ") +
       c.red(`${s.delete} deleted`),
   );
+}
+
+function printVault(res: VaultResult, title: string): void {
+  if (res.changes.length === 0) {
+    info(c.green("✔ ") + `Vault in sync (${res.scanned} files, ${res.unchanged} unchanged).`);
+    return;
+  }
+  info(c.bold(`\n${title}`) + c.gray(`  (${res.scanned} scanned, ${res.unchanged} unchanged)`));
+  for (const ch of res.changes) info(`  ${sym(ch.type)} ${ch.path}`);
+  const s = summarizeVault(res.changes);
+  info(
+    "\n  " +
+      c.green(`${s.add} added`) +
+      c.gray(" · ") +
+      c.yellow(`${s.modify} modified`) +
+      c.gray(" · ") +
+      c.red(`${s.delete} deleted`),
+  );
+}
+
+function summarizeVault(changes: VaultChange[]): Record<VaultChange["type"], number> {
+  const counts: Record<VaultChange["type"], number> = { add: 0, modify: 0, delete: 0 };
+  for (const ch of changes) counts[ch.type]++;
+  return counts;
 }
 
 async function confirm(question: string): Promise<boolean> {
@@ -226,8 +311,10 @@ function cmdInit(args: Args): void {
 
 async function cmdStatus(args: Args): Promise<void> {
   const cfg = loadConfig({ configPath: args.str.get("config") });
-  requireRepos(cfg);
   const opts = commonOpts(args, cfg);
+  if (opts.key !== undefined) return cmdVaultStatus(cfg, opts);
+
+  requireRepos(cfg);
 
   // Symmetric view: deletions=true surfaces files present on only one side.
   const plan = await buildPlan(cfg.a, cfg.b, {
@@ -311,8 +398,10 @@ function aheadHint(cfg: Config, file: string): string {
 
 async function cmdMigrate(args: Args, direction: "a" | "b"): Promise<void> {
   const cfg = loadConfig({ configPath: args.str.get("config") });
-  requireRepos(cfg);
   const opts = commonOpts(args, cfg);
+  if (opts.key !== undefined) return cmdVaultMigrate(cfg, direction, opts);
+
+  requireRepos(cfg);
   const { fromPath, toPath, fromLabel, toLabel } = resolveRoots(cfg, direction);
 
   const plan = await buildPlan(fromPath, toPath, {
@@ -353,6 +442,118 @@ async function cmdMigrate(args: Args, direction: "a" | "b"): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// encrypted-vault mode (push/pull/status with --key)
+//
+// A = plaintext local dev tree; B = an encrypted git repo (the "vault").
+// push encrypts A → B; pull decrypts B → A. Only files whose plaintext sha
+// changed are re-sealed, so git sees (and transfers) just the real diff.
+// ---------------------------------------------------------------------------
+
+async function cmdVaultStatus(cfg: Config, opts: CommonOpts): Promise<void> {
+  if (!existsSync(cfg.a)) fail(`Source path for ${cfg.labels.a} does not exist: ${cfg.a}`);
+  if (!isGitRepo(cfg.a)) warn(`${cfg.labels.a} is not a git repository — file enumeration needs git.`);
+
+  const res = await vaultStatus(cfg.a, cfg.b, opts.key as string, {
+    include: opts.include,
+    exclude: opts.exclude,
+  });
+  if (opts.json) return void out(JSON.stringify(res, null, 2));
+  printVault(res, `${cfg.labels.a} → vault (${shortPath(cfg.b)})`);
+}
+
+async function cmdVaultMigrate(cfg: Config, direction: "a" | "b", opts: CommonOpts): Promise<void> {
+  const key = opts.key as string;
+  const isPush = direction === "a";
+
+  if (isPush) {
+    if (!existsSync(cfg.a)) fail(`Source path for ${cfg.labels.a} does not exist: ${cfg.a}`);
+    if (!isGitRepo(cfg.a)) warn(`${cfg.labels.a} is not a git repository — file enumeration needs git.`);
+  }
+
+  const title = isPush
+    ? `${cfg.labels.a} → vault (${shortPath(cfg.b)})`
+    : `vault (${shortPath(cfg.b)}) → ${cfg.labels.a}`;
+
+  const run = (dry: boolean): Promise<VaultResult> =>
+    isPush
+      ? encryptPush(cfg.a, cfg.b, key, {
+          include: opts.include,
+          exclude: opts.exclude,
+          dryRun: dry,
+          prune: opts.deletions,
+        })
+      : decryptPull(cfg.b, cfg.a, key, { dryRun: dry });
+
+  const preview = await run(true);
+
+  if (opts.json) {
+    out(JSON.stringify(preview, null, 2));
+    if (!opts.dryRun && preview.changes.length) {
+      const applied = await run(false);
+      if (isPush) finalizeVault(cfg, opts, applied);
+    }
+    return;
+  }
+
+  printVault(preview, title);
+  if (preview.changes.length === 0) return;
+  if (opts.dryRun) return void info(c.gray("\nDry run — nothing was written."));
+
+  if (!opts.yes) {
+    const target = isPush ? `vault ${cfg.labels.b}` : cfg.labels.a;
+    const ok = await confirm(`\nApply ${preview.changes.length} change(s) to ${target}?`);
+    if (!ok) return void info(c.gray("Aborted."));
+  }
+
+  const applied = await run(false);
+  info(c.green("\n✔ ") + `Applied ${applied.changes.length} change(s).`);
+  if (isPush) finalizeVault(cfg, opts, applied);
+}
+
+/** After an encrypted push, optionally commit (and push) the vault repo B. */
+function finalizeVault(cfg: Config, opts: CommonOpts, applied: VaultResult): void {
+  const b = shortPath(cfg.b);
+
+  if (!opts.commit && !opts.push) {
+    info(c.gray(`\nVault updated — commit & push it to encrypt-at-rest on the remote:`));
+    info(c.gray(`  git -C ${b} add -A && git -C ${b} commit -m sync && git -C ${b} push`));
+    return;
+  }
+
+  if (!isGitRepo(cfg.b)) {
+    warn(`${cfg.labels.b} is not a git repository — run 'git -C ${b} init' first to use --commit/--push.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const s = summarizeVault(applied.changes);
+  const message =
+    opts.message ?? `twin-sync: ${s.add} added, ${s.modify} modified, ${s.delete} deleted`;
+
+  let committed: boolean;
+  try {
+    committed = commitAll(cfg.b, message);
+  } catch (err) {
+    warn(`Vault files written, but 'git commit' failed:\n${(err as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (committed) info(c.green("✔ ") + `Committed vault: ${c.gray(message)}`);
+  else info(c.gray("Nothing new to commit in the vault."));
+
+  if (opts.push) {
+    try {
+      pushRepo(cfg.b);
+      info(c.green("✔ ") + "Pushed vault to its remote.");
+    } catch (err) {
+      warn(`Vault committed, but 'git push' failed:\n${(err as Error).message}`);
+      warn(`Set a remote/upstream, then: git -C ${b} push`);
+      process.exitCode = 1;
+    }
+  }
+}
+
 function cmdHelp(): void {
   out(`${c.bold("twin-sync")} ${c.gray("v" + VERSION)} — sync two repos that share one codebase
 
@@ -363,6 +564,11 @@ ${c.bold("Usage")}
   twin-sync pull   [options]        migrate B → A
 
 ${c.bold("Options")}
+  --key <passphrase>   encrypted-vault mode: push encrypts A → B, pull decrypts B → A
+  --key-command <cmd>  run <cmd> and use its stdout as the key (e.g. a keychain read)
+  --commit             after an encrypted push, git-commit the vault repo B
+  --push               after an encrypted push, git-commit AND git-push B
+  --message, -m <msg>  commit message for --commit/--push
   --since <ref>        only consider files changed since <ref> in the source repo
   --include <glob>     restrict to matching paths (repeatable, git pathspec)
   --exclude <glob>     skip matching paths (repeatable, git pathspec)
@@ -375,14 +581,25 @@ ${c.bold("Options")}
   --help, -h           show this help
   --version, -v        print version
 
+${c.bold("Encrypted vault")} ${c.gray("(--key)")}
+  With --key, B becomes an encrypted git repo: files are stored as opaque
+  store/<id>.enc blobs plus an encrypted manifest — no names, paths, or
+  contents leak to the git host. Only files whose content changed are
+  re-sealed, so 'git push' of B transfers just the real diff. Additive by
+  default; add --delete to prune blobs for files removed from A.
+
 ${c.bold("Configuration")} ${c.gray("(priority: --config > env > .twin-sync.json)")}
   TWIN_SYNC_A, TWIN_SYNC_B   absolute paths to the two project roots
+  TWIN_SYNC_KEY              vault passphrase (literal)
+  TWIN_SYNC_KEY_COMMAND      command whose stdout is the passphrase (e.g. a keychain read)
 
 ${c.bold("Examples")}
   twin-sync init --a ../frontend-oss --b ../frontend-internal
   twin-sync status
   twin-sync push --since HEAD~5 --dry-run
   twin-sync pull --exclude 'node_modules' --exclude '*.env' --yes
+  twin-sync push --key 's3cret' --dry-run          # preview encrypt A → vault B
+  TWIN_SYNC_KEY=s3cret twin-sync pull --yes        # decrypt vault B → A
 `);
 }
 

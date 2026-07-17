@@ -23,6 +23,11 @@ export interface Config {
   labels: { a: string; b: string };
   /** Default exclude pathspecs applied to every command. */
   exclude: string[];
+  /**
+   * Shell command whose stdout is the vault passphrase (e.g. a secret-manager
+   * read). Safe to commit — it names where the key lives, not the key itself.
+   */
+  keyCommand?: string;
   /** Path the config was loaded from, if any (for messaging). */
   source: string | null;
 }
@@ -32,6 +37,7 @@ interface RawConfig {
   b?: string;
   labels?: { a?: string; b?: string };
   exclude?: string[];
+  keyCommand?: string;
 }
 
 function findUp(startDir: string, filename: string): string | null {
@@ -85,6 +91,7 @@ export function loadConfig(opts: {
       b: raw.labels?.b ?? "B",
     },
     exclude: raw.exclude ?? [],
+    keyCommand: raw.keyCommand,
     source: file ?? null,
   };
 }

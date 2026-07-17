@@ -20,6 +20,9 @@ function git(cwd: string, args: string[]): string {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
+      // Capture stderr instead of letting it inherit the terminal, so probes
+      // that are *expected* to fail (e.g. isGitRepo) don't spew "fatal:" lines.
+      stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (err) {
     const e = err as { stderr?: Buffer | string; message: string };
@@ -81,6 +84,48 @@ export function changedSince(
     git(cwd, ["ls-files", "-z", "--others", "--exclude-standard", ...specSep]),
   );
   return unique([...diff, ...untracked]).sort();
+}
+
+/**
+ * Stage everything and commit. Returns false (a no-op, not an error) when there
+ * was nothing staged to commit — e.g. a re-push that changed no files.
+ */
+export function commitAll(cwd: string, message: string): boolean {
+  git(cwd, ["add", "-A"]);
+  try {
+    // `diff --cached --quiet` exits 0 when the index matches HEAD (nothing to do).
+    git(cwd, ["diff", "--cached", "--quiet"]);
+    return false;
+  } catch {
+    // exit 1 => staged changes exist; fall through and commit them.
+  }
+  git(cwd, ["commit", "-m", message]);
+  return true;
+}
+
+/**
+ * Push the current branch. If an upstream is already set, a plain `git push`
+ * suffices; otherwise (a fresh vault repo) pick a remote — preferring `origin`
+ * — and push with `-u` so subsequent pushes are just `git push`.
+ */
+export function pushRepo(cwd: string): void {
+  try {
+    git(cwd, ["rev-parse", "--abbrev-ref", "@{u}"]); // throws if no upstream
+    git(cwd, ["push"]);
+    return;
+  } catch {
+    // no upstream configured yet — fall through to first-push setup
+  }
+
+  const remotes = git(cwd, ["remote"]).split("\n").map((s) => s.trim()).filter(Boolean);
+  if (remotes.length === 0) {
+    throw new GitError(
+      "no git remote configured for the vault — add one: git remote add origin <url>",
+    );
+  }
+  const remote = remotes.includes("origin") ? "origin" : (remotes[0] as string);
+  const branch = git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  git(cwd, ["push", "-u", remote, branch]);
 }
 
 /** Last commit that touched `file`, for informational "which side is ahead" hints. */
