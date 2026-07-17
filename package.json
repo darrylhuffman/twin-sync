@@ -1,6 +1,6 @@
 {
   "name": "twin-sync",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Sync two project directories that live in separate git repos but share the same codebase. Uses git history to scope changes and content hashing to migrate only what actually differs.",
   "type": "module",
   "bin": {

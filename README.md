@@ -76,6 +76,15 @@ Set-Secret twin-sync 'your-passphrase'                                          
   tradeoff is any process running as you can read it, but it's encrypted on disk and
   never exposed as plaintext env/args.
 
+> **If `tsync push` says `pwsh is not recognized`:** PowerShell 7 isn't on your
+> terminal's PATH (twin-sync runs the key command via `cmd`, which then can't find
+> `pwsh`). Use pwsh's absolute path in the command — the space-free short path avoids
+> quoting issues:
+> ```powershell
+> [Environment]::SetEnvironmentVariable('TWIN_SYNC_KEY_COMMAND','C:\PROGRA~1\POWERS~1\7\pwsh.exe -NoProfile -Command "Get-Secret twin-sync -AsPlainText"','User')
+> ```
+> (Or add `C:\Program Files\PowerShell\7` to your PATH.) Open a new terminal after.
+
 **Any other command works too** — `--key-command` just uses a command's stdout, so
 anything that prints your secret is valid (a trailing newline is trimmed; stdin/stderr
 pass through so an interactive/biometric unlock still works). Prefer to keep it with
