@@ -76,14 +76,20 @@ Set-Secret twin-sync 'your-passphrase'                                          
   tradeoff is any process running as you can read it, but it's encrypted on disk and
   never exposed as plaintext env/args.
 
-> **If `tsync push` says `pwsh is not recognized`:** PowerShell 7 isn't on your
-> terminal's PATH (twin-sync runs the key command via `cmd`, which then can't find
-> `pwsh`). Use pwsh's absolute path in the command — the space-free short path avoids
-> quoting issues:
-> ```powershell
-> [Environment]::SetEnvironmentVariable('TWIN_SYNC_KEY_COMMAND','C:\PROGRA~1\POWERS~1\7\pwsh.exe -NoProfile -Command "Get-Secret twin-sync -AsPlainText"','User')
-> ```
-> (Or add `C:\Program Files\PowerShell\7` to your PATH.) Open a new terminal after.
+> **`pwsh is not recognized`?** twin-sync runs the key command via `cmd`, so the
+> PowerShell it names has to be findable there. Pick the one you have:
+> - **PowerShell 7 installed but not on PATH** — use its absolute, space-free path:
+>   `C:\PROGRA~1\POWERS~1\7\pwsh.exe -NoProfile -Command "Get-Secret twin-sync -AsPlainText"`
+>   (or add `C:\Program Files\PowerShell\7` to PATH).
+> - **Only Windows PowerShell 5.1** (in `System32`, there's no `pwsh`) — use `powershell`,
+>   which is always on PATH:
+>   ```powershell
+>   [Environment]::SetEnvironmentVariable('TWIN_SYNC_KEY_COMMAND','powershell -NoProfile -Command "Get-Secret twin-sync -AsPlainText"','User')
+>   ```
+>   5.1 keeps its modules separately, so install them from a **5.1** prompt if `Get-Secret`
+>   is unknown there: `Install-Module Microsoft.PowerShell.SecretManagement, Microsoft.PowerShell.SecretStore -Scope CurrentUser -Force`
+>
+> Open a new terminal after changing the command.
 
 **Any other command works too** — `--key-command` just uses a command's stdout, so
 anything that prints your secret is valid (a trailing newline is trimmed; stdin/stderr
