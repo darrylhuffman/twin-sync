@@ -121,8 +121,13 @@ store/<id>.enc     one sealed blob per file; the real path is inside it
   single point of failure.
 - **Hidden:** names, paths, structure, contents. **Visible to the host:** the file
   count and each file's approximate size — the price of per-file incremental pull.
-- Additive by default; add `--delete` to prune blobs for files removed from A.
-  `.gitignore` is respected. A wrong key fails loudly (auth error), never writes garbage.
+- **Deletions mirror both ways by default.** Delete a file in A → the next `push`
+  removes its blob from B; delete it in B (or pull an updated vault) → the next
+  `pull` removes it from A. Pass `--no-delete` to keep the target additive.
+  Pruning is scoped to git-visible files, so `.gitignore`d paths (`node_modules`,
+  secrets, build output) are never touched — but note a `pull` **will delete
+  local-only files in A that aren't in the vault**, so keep A a true mirror (or use
+  `--no-delete`). A wrong key fails loudly (auth error), never writes garbage.
 
 ## Commands
 
@@ -142,7 +147,8 @@ store/<id>.enc     one sealed blob per file; the real path is inside it
 | `--commit` | After an encrypted `push`, `git add -A && git commit` the vault repo B. |
 | `--push` | After an encrypted `push`, commit **and** `git push` B (implies `--commit`). |
 | `--message`, `-m <msg>` | Commit message for `--commit`/`--push` (default summarizes the change counts). |
-| `--delete` | Also remove destination files that no longer exist in the source. Off by default. |
+| `--delete` | (plaintext mode) also remove destination files missing from the source. Off by default. |
+| `--no-delete` | (vault mode) keep the target additive — don't propagate deletions. Vault `push`/`pull` mirror deletions by default. |
 | `--dry-run`, `-n` | Preview without writing anything. |
 | `--yes`, `-y` | Skip the confirmation prompt (required in non-interactive shells). |
 | `--since <ref>` | Only consider files changed since `<ref>` in the source repo. |
